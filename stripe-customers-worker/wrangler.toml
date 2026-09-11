@@ -1,0 +1,18 @@
+name = "stripe-customers"
+main = "worker.js"
+compatibility_date = "2026-05-01"
+
+# Slate ▸ Stripe Customers — sync every rostered SPM player of a session
+# into the league's Stripe account as a Customer (read-first, diff-write).
+# Live at https://stripe-customers.spmapa.workers.dev
+#
+# Secrets (set via CLI, never in this file):
+#   npx wrangler secret put STRIPE_RAK            # rk_live_… RESTRICTED key, Customers: Write ONLY
+#   npx wrangler secret put SUPABASE_SERVICE_KEY  # slate service_role JWT (also the caller's bearer)
+#
+# The key is a Restricted API Key on purpose: if it ever leaks it can only
+# read/write Customers — no charges, no payouts, no payment methods.
+
+[vars]
+SUPABASE_URL = "https://dqzbekoaysgaiqljueac.supabase.co"
+STRIPE_VERSION = "2026-08-26.dahlia"
