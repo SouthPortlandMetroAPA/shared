@@ -28,9 +28,23 @@ function serviceKey() {
   return '';
 }
 
+/* Cloudflare auth: the operator's PowerShell profile exports
+   CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID (set 2026-06-23); a shell
+   that skipped the profile inherits neither, and wrangler then falls back
+   to an OAuth token that expired 2026-09-06. Read the profile when the env
+   is bare — API-token auth is what wrangler used for every earlier deploy. */
+if (!process.env.CLOUDFLARE_API_TOKEN) {
+  try {
+    const prof = readFileSync(process.env.USERPROFILE + '/OneDrive/Documents/PowerShell/Microsoft.PowerShell_profile.ps1', 'utf8');
+    for (const k of ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID']) {
+      const m = prof.match(new RegExp('\\$env:' + k + '\\s*=\\s*["\']([^"\']+)["\']'));
+      if (m) process.env[k] = m[1];
+    }
+  } catch {}
+}
 const who = sh('npx wrangler whoami');
 if (/Not logged in|Failed to fetch auth token/.test(who.stdout + who.stderr)) {
-  console.error('wrangler is not logged in — run `npx wrangler login` (opens a browser), then re-run this script.');
+  console.error('wrangler is not authenticated — set CLOUDFLARE_API_TOKEN (see the PowerShell profile) or run `npx wrangler login`.');
   process.exit(2);
 }
 const RAK = rak(), SVC = serviceKey();
@@ -48,4 +62,4 @@ for (const [name, value] of [['STRIPE_RAK', RAK], ['SUPABASE_SERVICE_KEY', SVC]]
 }
 const h = await (await fetch('https://stripe-customers.spmapa.workers.dev/health')).json().catch(e => ({ error: e.message }));
 console.log('health:', JSON.stringify(h));
-process.exit(h.ok && h.key === 'restricted' ? 0 : 1);
+process.exitCode = h.ok && h.key === 'restricted' ? 0 : 1;

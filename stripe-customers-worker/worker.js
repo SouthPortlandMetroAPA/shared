@@ -35,6 +35,16 @@
 //                  Create carries Idempotency-Key slate-cust-<apa>-v1.
 //   6. mirror    ← upsert slate.stripe_customers for every written row.
 //
+// SUBREQUEST BUDGET (2026-09-11, escape 0911-stripe-subrequests): a Worker
+//   invocation may make only N outbound fetches (50 on the free plan, 1000
+//   paid). The first full sync tried 937 creates in one call and died at
+//   "Too many subrequests" with 37 created and the mirror unwritten. Every
+//   fetch now counts against SUBREQUEST_BUDGET; writes stop when the budget
+//   is nearly spent, the mirror is flushed, and the response carries
+//   `remaining` — the client calls /sync again until remaining == 0. Each
+//   call re-sweeps, so a customer created in an earlier batch is found by
+//   metadata.apa_number and is never created twice.
+//
 // METADATA SHAPE (values ≤ 500 chars — Stripe's limit; enforced here)
 //   apa_number    "97218821"          member_number "18821"   source "slate"
 //   session       "Fall 2026"
@@ -52,6 +62,10 @@ const CORS_HEADERS = {
   'Access-Control-Max-Age': '86400',
 };
 const SPM_OPERATOR_ID = 1;
+const SUBREQUEST_BUDGET = 48;         // free-plan cap is 50; keep 2 spare for the mirror flush
+let _subrequests = 0;                 // per-invocation (module state is reset per isolate, and we reset in handleSync)
+async function counted(url, init) { _subrequests++; return fetch(url, init); }
+class BudgetExhausted extends Error {}
 const META_MAX = 500;                 // Stripe metadata value limit
 const ROLE_RANK = { 'Captain': 0, 'Co-Captain': 1, 'Member': 2 };
 
@@ -64,7 +78,7 @@ function jsonResponse(obj, status) {
 
 // ── Supabase (service role) ───────────────────────────────────────────
 async function sb(env, method, path, body, extraHeaders) {
-  const r = await fetch(env.SUPABASE_URL + '/rest/v1/' + path, {
+  const r = await counted(env.SUPABASE_URL + '/rest/v1/' + path, {
     method,
     headers: {
       apikey: env.SUPABASE_SERVICE_KEY,
@@ -98,7 +112,7 @@ async function stripe(env, method, path, { body, idem } = {}) {
   if (body) { headers['Content-Type'] = 'application/x-www-form-urlencoded'; payload = new URLSearchParams(body).toString(); }
   if (idem) headers['Idempotency-Key'] = idem;
   for (let attempt = 0; ; attempt++) {
-    const r = await fetch('https://api.stripe.com' + path, { method, headers, body: payload });
+    const r = await counted('https://api.stripe.com' + path, { method, headers, body: payload });
     if (r.status === 429 && attempt < 5) {          // rate limit / lock timeout → exponential backoff + jitter
       await new Promise(res => setTimeout(res, (250 << attempt) + Math.random() * 200));
       continue;
@@ -205,6 +219,7 @@ async function loadRoster(env, sessionId) {
 
 // ── /sync ─────────────────────────────────────────────────────────────
 async function handleSync(request, env) {
+  _subrequests = 0;
   const auth = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/, '');
   if (!auth || auth !== env.SUPABASE_SERVICE_KEY) return jsonResponse({ ok: false, error: 'unauthorized' }, 401);
 
@@ -263,14 +278,20 @@ async function handleSync(request, env) {
   // 5. write (unless dry run)
   const writes = { created: 0, updated: 0, adopted: 0, unchanged: plan.unchanged, skipped: plan.skip, errors: 0 };
   const mirrorUpserts = [];
+  let remaining = 0, stopped = false;
   if (!dryRun) {
+    const mirrorFlushCost = 1 + Math.floor(rows.length / 500);
     for (const r of rows) {
+      const isWrite = r.action === 'create' || r.action === 'update' || r.action === 'adopt';
+      if (isWrite && (stopped || _subrequests + 1 + mirrorFlushCost > SUBREQUEST_BUDGET)) {
+        stopped = true; remaining++; r.result = 'deferred'; continue;   // next invocation picks it up
+      }
       if (r.action === 'create') {
-        const res = await stripe(env, 'POST', '/v1/customers', { body: toForm(r._want), idem: 'slate-cust-' + r.apa + '-v1' });
+        const res = await stripe(env, 'POST', '/v1/customers', { body: toForm(r._want), idem: 'slate-cust-' + r.apa + '-v1' }).catch(e => ({ status: 0, json: { error: { message: String(e.message || e) } } }));
         if (res.status === 200) { r.customer_id = res.json.id; r.result = 'created'; writes.created++; mirrorUpserts.push({ apa_number: r.apa, stripe_customer_id: res.json.id, email: r.email, name: r.name, livemode: !!res.json.livemode, last_session_id: sessionId, last_sync_status: 'created', last_synced_at: new Date().toISOString() }); }
         else { r.result = 'error'; r.error = (res.json.error && res.json.error.message) || ('HTTP ' + res.status); writes.errors++; }
       } else if (r.action === 'update' || r.action === 'adopt') {
-        const res = await stripe(env, 'POST', '/v1/customers/' + r.customer_id, { body: r._form });   // full overwrite
+        const res = await stripe(env, 'POST', '/v1/customers/' + r.customer_id, { body: r._form }).catch(e => ({ status: 0, json: { error: { message: String(e.message || e) } } }));   // full overwrite
         if (res.status === 200) { r.result = r.action === 'adopt' ? 'adopted' : 'updated'; writes[r.result]++; mirrorUpserts.push({ apa_number: r.apa, stripe_customer_id: r.customer_id, email: r.email, name: r.name, livemode: !!res.json.livemode, last_session_id: sessionId, last_sync_status: r.result, last_synced_at: new Date().toISOString() }); }
         else { r.result = 'error'; r.error = (res.json.error && res.json.error.message) || ('HTTP ' + res.status); writes.errors++; }
       } else if (r.action === 'unchanged' && !mirror.has(r.apa) && r.customer_id) {
@@ -285,7 +306,7 @@ async function handleSync(request, env) {
   }
 
   for (const r of rows) { delete r._want; delete r._form; }
-  return jsonResponse({ ok: true, dry_run: dryRun, session, roster: allPlayers.length, stripe_scanned: customers.length, plan, writes, rows });
+  return jsonResponse({ ok: true, dry_run: dryRun, session, roster: allPlayers.length, stripe_scanned: customers.length, plan, writes, remaining, subrequests: _subrequests, budget: SUBREQUEST_BUDGET, rows });
 }
 
 // ══════════════════════════════════════════════════════════════════════
