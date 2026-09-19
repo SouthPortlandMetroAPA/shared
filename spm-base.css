@@ -171,3 +171,26 @@ html, body {
   color: var(--muted);
   padding: 24px 0 16px;
 }
+
+/* -- Responsive shell (2026-09-18) ---------------------------------------
+ * Phone: one column (unchanged). Tablet (>=768): .spm-two lays paired fields side by side.
+ * Desktop (>=1200): .spm-page.spm-wide widens and .spm-shell becomes a two-column grid — the flow on the left,
+ * a sticky .spm-rail on the right (a live summary of what the person has picked). The rail is display:none below
+ * desktop, so phones and tablets never load a second column. Same treatment in every app that opts in. */
+.spm-shell { display: block; }
+.spm-rail { display: none; }
+@media (min-width: 768px) {
+  .spm-two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: start; }
+}
+@media (min-width: 1200px) {
+  .spm-page.spm-wide { max-width: 1080px; }
+  .spm-shell { display: grid; grid-template-columns: minmax(0, 640px) minmax(280px, 1fr); gap: 24px; align-items: start; }
+  .spm-rail { display: block; position: sticky; top: 20px; }
+}
+.spm-rail .spm-rail-card { background: var(--card); border: 1px solid var(--border); border-radius: 22px; padding: 18px 20px; box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06); }
+.spm-rail h3 { margin: 0 0 10px; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.spm-rail dl { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; font-size: 0.95rem; }
+.spm-rail dt { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.05em; padding-top: 3px; white-space: nowrap; }
+.spm-rail dd { margin: 0; overflow-wrap: anywhere; }
+.spm-rail dd.spm-rail-empty { color: var(--muted); font-style: italic; }
+.spm-rail .spm-rail-note { margin: 14px 0 0; padding-top: 12px; border-top: 1px solid var(--border); font-size: 0.9rem; color: var(--muted); line-height: 1.45; }
